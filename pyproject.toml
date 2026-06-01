@@ -1,0 +1,19 @@
+[project]
+name = "feathr-events"
+version = "0.1.0"
+description = "Distributed Event Processing Platform"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra --strict-markers"
+markers = [
+    "integration: end-to-end tests that exercise the full ingest pipeline",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

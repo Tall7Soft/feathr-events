@@ -1,0 +1,848 @@
+{
+  "info": {
+    "_postman_id": "f1e2d3c4-b5a6-7890-1234-567890abcdef",
+    "name": "Feathr Distributed Event Processing Platform",
+    "description": "Postman collection for the Distributed Event Processing Platform.\n\n## Quick start\n\n1. Make sure the stack is running:\n   ```\n   cd feathr-events && docker compose up -d\n   ```\n2. Confirm health: send `Health / GET /health` — should return `{\"status\":\"ok\"}`.\n3. Optionally seed events via the `Ingestion / POST /events (happy path)` request.\n4. Explore the four query endpoints under `Queries`.\n\n## Variables\n\n- `baseUrl` — defaults to `http://localhost:8000`. Override for staging / production.\n- `userId` — used as the example user for filter requests.\n- `eventType` — used as the example event type for filter requests.\n- `lastEventId` — auto-set by the `POST /events` test script so follow-up requests can reference it.\n- `windowStart`, `windowEnd` — used by stats / search date-range requests.\n\n## Structure\n\nFolders mirror the API surface:\n\n- **Health** — liveness + queue observability.\n- **Ingestion** — `POST /events` happy path + every validation error case.\n- **Queries** — list / stats / search / realtime, including filter combinations and 422 cases.\n- **Workflow examples** — sequenced requests showing the full ingest → query lifecycle.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Health",
+      "description": "Liveness and observability endpoints. The rate limiter is exempt from `/health*`, so these stay available even under abuse.",
+      "item": [
+        {
+          "name": "GET /health (liveness)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.test('status: ok', () => {",
+                  "  pm.expect(pm.response.json()).to.deep.equal({status: 'ok'});",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/health",
+              "host": ["{{baseUrl}}"],
+              "path": ["health"]
+            },
+            "description": "Always returns `{\"status\":\"ok\"}` once the app process is up. Used by container healthchecks and external uptime monitors. Exempt from the rate limiter."
+          }
+        },
+        {
+          "name": "GET /health/queue (observability snapshot)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.test('exposes worker counters', () => {",
+                  "  const body = pm.response.json();",
+                  "  ['queue_depth','queue_in_flight','dlq_depth','processed','failed','dead_lettered','duplicates_suppressed']",
+                  "    .forEach(k => pm.expect(body).to.have.property(k));",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/health/queue",
+              "host": ["{{baseUrl}}"],
+              "path": ["health", "queue"]
+            },
+            "description": "Snapshot of queue + worker counters: queue depth, in-flight messages, DLQ depth, processed / failed / dead-lettered totals, and duplicate-suppression count. Used by ops dashboards and the integration test suite."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Ingestion",
+      "description": "`POST /events` — validates the payload and enqueues it for async processing. Returns `202 Accepted` with the server-generated `event_id`. Persistence to MongoDB and indexing in Elasticsearch happen in the background worker.",
+      "item": [
+        {
+          "name": "POST /events (happy path)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('202 Accepted', () => pm.response.to.have.status(202));",
+                  "const body = pm.response.json();",
+                  "pm.test('returns status + event_id', () => {",
+                  "  pm.expect(body.status).to.eql('accepted');",
+                  "  pm.expect(body.event_id).to.be.a('string').and.have.length(32);",
+                  "});",
+                  "// Capture event_id for downstream requests in the workflow folder.",
+                  "pm.collectionVariables.set('lastEventId', body.event_id);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"event_type\": \"click\",\n  \"user_id\": \"{{userId}}\",\n  \"source_url\": \"https://feathr.co/spring-campaign\",\n  \"metadata\": {\n    \"campaign\": \"spring-2026\",\n    \"label\": \"hero-cta\",\n    \"browser\": \"chrome\"\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/events",
+              "host": ["{{baseUrl}}"],
+              "path": ["events"]
+            },
+            "description": "Submit a single event. `timestamp` is optional — if omitted, the server stamps `now()`. `metadata` is a free-form JSON object capped at 64 top-level keys.\n\nResponse shape:\n```json\n{\"status\": \"accepted\", \"event_id\": \"a1b2c3...\"}\n```"
+          }
+        },
+        {
+          "name": "POST /events (with explicit timestamp)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"event_type\": \"conversion\",\n  \"user_id\": \"{{userId}}\",\n  \"source_url\": \"https://feathr.co/checkout\",\n  \"timestamp\": \"2026-05-25T16:00:00Z\",\n  \"metadata\": {\n    \"campaign\": \"spring-2026\",\n    \"amount\": 99.99\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/events",
+              "host": ["{{baseUrl}}"],
+              "path": ["events"]
+            },
+            "description": "Producer-provided timestamp. Useful for backfill or events buffered client-side."
+          }
+        },
+        {
+          "name": "POST /events (event_type normalized to lowercase)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"event_type\": \"PageView\",\n  \"user_id\": \"{{userId}}\",\n  \"source_url\": \"https://feathr.co/\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/events",
+              "host": ["{{baseUrl}}"],
+              "path": ["events"]
+            },
+            "description": "`event_type` is normalized to lowercase server-side so reporting doesn't fragment across capitalization variants (`PageView`, `pageview`, `PAGEVIEW`)."
+          }
+        },
+        {
+          "name": "POST /events (validation: missing user_id) [422]",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('422 Unprocessable Entity', () => pm.response.to.have.status(422));",
+                  "pm.test('mentions missing field', () => {",
+                  "  const detail = JSON.stringify(pm.response.json().detail);",
+                  "  pm.expect(detail).to.include('user_id');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"event_type\": \"click\",\n  \"source_url\": \"https://feathr.co\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/events",
+              "host": ["{{baseUrl}}"],
+              "path": ["events"]
+            },
+            "description": "Required-field validation. `user_id` (and `event_type`, `source_url`) are mandatory."
+          }
+        },
+        {
+          "name": "POST /events (validation: invalid URL) [422]",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('422 Unprocessable Entity', () => pm.response.to.have.status(422));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"event_type\": \"click\",\n  \"user_id\": \"{{userId}}\",\n  \"source_url\": \"not a valid url\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/events",
+              "host": ["{{baseUrl}}"],
+              "path": ["events"]
+            },
+            "description": "URL validation. `source_url` must parse as a valid HTTP(S) URL."
+          }
+        },
+        {
+          "name": "POST /events (validation: extra field forbidden) [422]",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('422 Unprocessable Entity', () => pm.response.to.have.status(422));",
+                  "pm.test('rejects extra fields', () => {",
+                  "  const detail = JSON.stringify(pm.response.json().detail);",
+                  "  pm.expect(detail).to.include('extra_forbidden');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"event_type\": \"click\",\n  \"user_id\": \"{{userId}}\",\n  \"source_url\": \"https://feathr.co\",\n  \"unexpected_field\": \"value\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/events",
+              "host": ["{{baseUrl}}"],
+              "path": ["events"]
+            },
+            "description": "Strict schema. Extra top-level fields are rejected to keep producers honest about the contract."
+          }
+        },
+        {
+          "name": "POST /events (validation: empty event_type) [422]",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"event_type\": \"\",\n  \"user_id\": \"{{userId}}\",\n  \"source_url\": \"https://feathr.co\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/events",
+              "host": ["{{baseUrl}}"],
+              "path": ["events"]
+            },
+            "description": "Empty strings on required string fields are rejected."
+          }
+        },
+        {
+          "name": "POST /events (validation: oversized metadata) [422]",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"event_type\": \"click\",\n  \"user_id\": \"{{userId}}\",\n  \"source_url\": \"https://feathr.co\",\n  \"metadata\": {\n    \"k1\":1,\"k2\":2,\"k3\":3,\"k4\":4,\"k5\":5,\"k6\":6,\"k7\":7,\"k8\":8,\"k9\":9,\"k10\":10,\n    \"k11\":1,\"k12\":2,\"k13\":3,\"k14\":4,\"k15\":5,\"k16\":6,\"k17\":7,\"k18\":8,\"k19\":9,\"k20\":10,\n    \"k21\":1,\"k22\":2,\"k23\":3,\"k24\":4,\"k25\":5,\"k26\":6,\"k27\":7,\"k28\":8,\"k29\":9,\"k30\":10,\n    \"k31\":1,\"k32\":2,\"k33\":3,\"k34\":4,\"k35\":5,\"k36\":6,\"k37\":7,\"k38\":8,\"k39\":9,\"k40\":10,\n    \"k41\":1,\"k42\":2,\"k43\":3,\"k44\":4,\"k45\":5,\"k46\":6,\"k47\":7,\"k48\":8,\"k49\":9,\"k50\":10,\n    \"k51\":1,\"k52\":2,\"k53\":3,\"k54\":4,\"k55\":5,\"k56\":6,\"k57\":7,\"k58\":8,\"k59\":9,\"k60\":10,\n    \"k61\":1,\"k62\":2,\"k63\":3,\"k64\":4,\"k65\":5\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/events",
+              "host": ["{{baseUrl}}"],
+              "path": ["events"]
+            },
+            "description": "Metadata is capped at 64 top-level keys (defense in depth against partner-side bugs that would otherwise blow out the Elasticsearch field mapping)."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Queries",
+      "description": "Read-only query endpoints. Mongo backs `/events` and `/events/stats`; Elasticsearch backs `/events/search`; Redis caches `/events/stats/realtime`.",
+      "item": [
+        {
+          "name": "GET /events (no filter)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.test('returns items array + paging metadata', () => {",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body).to.have.property('items');",
+                  "  pm.expect(body).to.have.property('count');",
+                  "  pm.expect(body).to.have.property('skip');",
+                  "  pm.expect(body).to.have.property('limit');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/events?limit=20&sort=desc",
+              "host": ["{{baseUrl}}"],
+              "path": ["events"],
+              "query": [
+                {"key": "limit", "value": "20"},
+                {"key": "sort", "value": "desc"}
+              ]
+            },
+            "description": "List the most recent events. `sort=desc` is the default; results are paged via `skip`/`limit`. Maximum `limit` is 1000."
+          }
+        },
+        {
+          "name": "GET /events (filter by event_type)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/events?event_type={{eventType}}&limit=100",
+              "host": ["{{baseUrl}}"],
+              "path": ["events"],
+              "query": [
+                {"key": "event_type", "value": "{{eventType}}"},
+                {"key": "limit", "value": "100"}
+              ]
+            },
+            "description": "Filter by event type. Backed by the `(event_type, timestamp desc)` Mongo index for fast lookups."
+          }
+        },
+        {
+          "name": "GET /events (filter by user_id)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/events?user_id={{userId}}&limit=100",
+              "host": ["{{baseUrl}}"],
+              "path": ["events"],
+              "query": [
+                {"key": "user_id", "value": "{{userId}}"},
+                {"key": "limit", "value": "100"}
+              ]
+            },
+            "description": "Per-user history. Backed by the `(user_id, timestamp desc)` Mongo index."
+          }
+        },
+        {
+          "name": "GET /events (filter by source_url)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/events?source_url=https://feathr.co/spring-campaign&limit=100",
+              "host": ["{{baseUrl}}"],
+              "path": ["events"],
+              "query": [
+                {"key": "source_url", "value": "https://feathr.co/spring-campaign"},
+                {"key": "limit", "value": "100"}
+              ]
+            },
+            "description": "Exact-URL filter. Not directly indexed in Mongo (see ARCHITECTURE.md §5 — indexes deliberately not added) but performant because the `event_type, timestamp` index narrows the working set first."
+          }
+        },
+        {
+          "name": "GET /events (filter by date range)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/events?start={{windowStart}}&end={{windowEnd}}&limit=100",
+              "host": ["{{baseUrl}}"],
+              "path": ["events"],
+              "query": [
+                {"key": "start", "value": "{{windowStart}}"},
+                {"key": "end", "value": "{{windowEnd}}"},
+                {"key": "limit", "value": "100"}
+              ]
+            },
+            "description": "Half-open window: `start <= timestamp < end`. Composes cleanly when chaining requests."
+          }
+        },
+        {
+          "name": "GET /events (combined filters)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/events?user_id={{userId}}&event_type={{eventType}}&start={{windowStart}}&end={{windowEnd}}&limit=100",
+              "host": ["{{baseUrl}}"],
+              "path": ["events"],
+              "query": [
+                {"key": "user_id", "value": "{{userId}}"},
+                {"key": "event_type", "value": "{{eventType}}"},
+                {"key": "start", "value": "{{windowStart}}"},
+                {"key": "end", "value": "{{windowEnd}}"},
+                {"key": "limit", "value": "100"}
+              ]
+            },
+            "description": "All filters are AND-combined."
+          }
+        },
+        {
+          "name": "GET /events (pagination via skip + limit)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/events?limit=2&skip=2",
+              "host": ["{{baseUrl}}"],
+              "path": ["events"],
+              "query": [
+                {"key": "limit", "value": "2"},
+                {"key": "skip", "value": "2"}
+              ]
+            },
+            "description": "Skip-based pagination. `limit` is capped at 1000; `skip` is capped at 100,000."
+          }
+        },
+        {
+          "name": "GET /events/stats (day bucket)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.test('returns bucketed counts', () => {",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.bucket).to.eql('day');",
+                  "  pm.expect(body).to.have.property('items');",
+                  "  if (body.items.length > 0) {",
+                  "    pm.expect(body.items[0]).to.have.all.keys('event_type','bucket_start','count');",
+                  "  }",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/events/stats?start={{windowStart}}&end={{windowEnd}}&bucket=day",
+              "host": ["{{baseUrl}}"],
+              "path": ["events", "stats"],
+              "query": [
+                {"key": "start", "value": "{{windowStart}}"},
+                {"key": "end", "value": "{{windowEnd}}"},
+                {"key": "bucket", "value": "day"}
+              ]
+            },
+            "description": "Mongo aggregation pipeline grouping events by type and time bucket. Returns one row per `(event_type, bucket_start)`."
+          }
+        },
+        {
+          "name": "GET /events/stats (hour bucket)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/events/stats?start={{windowStart}}&end={{windowEnd}}&bucket=hour",
+              "host": ["{{baseUrl}}"],
+              "path": ["events", "stats"],
+              "query": [
+                {"key": "start", "value": "{{windowStart}}"},
+                {"key": "end", "value": "{{windowEnd}}"},
+                {"key": "bucket", "value": "hour"}
+              ]
+            },
+            "description": "Hourly buckets. Use for narrow windows (e.g., last 24h)."
+          }
+        },
+        {
+          "name": "GET /events/stats (week bucket, ISO Monday)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/events/stats?start={{windowStart}}&end={{windowEnd}}&bucket=week",
+              "host": ["{{baseUrl}}"],
+              "path": ["events", "stats"],
+              "query": [
+                {"key": "start", "value": "{{windowStart}}"},
+                {"key": "end", "value": "{{windowEnd}}"},
+                {"key": "bucket", "value": "week"}
+              ]
+            },
+            "description": "Weekly buckets aligned to Monday (ISO 8601). Mongo's `$dateTrunc` default is Sunday; we pin Monday explicitly."
+          }
+        },
+        {
+          "name": "GET /events/stats (validation: missing window) [422]",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/events/stats",
+              "host": ["{{baseUrl}}"],
+              "path": ["events", "stats"]
+            },
+            "description": "Both `start` and `end` are required."
+          }
+        },
+        {
+          "name": "GET /events/stats (validation: invalid bucket) [422]",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/events/stats?start={{windowStart}}&end={{windowEnd}}&bucket=month",
+              "host": ["{{baseUrl}}"],
+              "path": ["events", "stats"],
+              "query": [
+                {"key": "start", "value": "{{windowStart}}"},
+                {"key": "end", "value": "{{windowEnd}}"},
+                {"key": "bucket", "value": "month"}
+              ]
+            },
+            "description": "`bucket` must be one of `hour`, `day`, `week`."
+          }
+        },
+        {
+          "name": "GET /events/search (full-text via Elasticsearch)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.test('returns items + count', () => {",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body).to.have.property('items');",
+                  "  pm.expect(body).to.have.property('count');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/events/search?q=spring",
+              "host": ["{{baseUrl}}"],
+              "path": ["events", "search"],
+              "query": [
+                {"key": "q", "value": "spring"}
+              ]
+            },
+            "description": "Full-text search over `metadata.*` and `source_url.text`. The `simple_query_string` query uses `lenient: true` so numeric metadata fields don't break unrelated text searches."
+          }
+        },
+        {
+          "name": "GET /events/search (with event_type filter)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/events/search?q=spring&event_type=click",
+              "host": ["{{baseUrl}}"],
+              "path": ["events", "search"],
+              "query": [
+                {"key": "q", "value": "spring"},
+                {"key": "event_type", "value": "click"}
+              ]
+            },
+            "description": "Combine free-text search with structured filters."
+          }
+        },
+        {
+          "name": "GET /events/search (with date range)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/events/search?q=campaign&start={{windowStart}}&end={{windowEnd}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["events", "search"],
+              "query": [
+                {"key": "q", "value": "campaign"},
+                {"key": "start", "value": "{{windowStart}}"},
+                {"key": "end", "value": "{{windowEnd}}"}
+              ]
+            },
+            "description": "Free-text + date filter."
+          }
+        },
+        {
+          "name": "GET /events/search (URL path fragment)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/events/search?q=checkout",
+              "host": ["{{baseUrl}}"],
+              "path": ["events", "search"],
+              "query": [
+                {"key": "q", "value": "checkout"}
+              ]
+            },
+            "description": "URLs are indexed both as `keyword` (exact match) and via a `text` subfield (path-fragment match). Searching for `checkout` finds `https://feathr.co/checkout`."
+          }
+        },
+        {
+          "name": "GET /events/search (validation: missing q) [422]",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/events/search",
+              "host": ["{{baseUrl}}"],
+              "path": ["events", "search"]
+            },
+            "description": "`q` is required."
+          }
+        },
+        {
+          "name": "GET /events/stats/realtime (Redis-cached summary)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.test('returns realtime summary shape', () => {",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body).to.have.property('cache_hit');",
+                  "  pm.expect(body).to.have.property('window_seconds');",
+                  "  pm.expect(body).to.have.property('total');",
+                  "  pm.expect(body).to.have.property('by_type');",
+                  "  pm.expect(body).to.have.property('generated_at');",
+                  "});",
+                  "pm.test('generated_at uses Z suffix (UTC)', () => {",
+                  "  pm.expect(pm.response.json().generated_at).to.match(/Z$/);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/events/stats/realtime",
+              "host": ["{{baseUrl}}"],
+              "path": ["events", "stats", "realtime"]
+            },
+            "description": "Lightweight rolling-window stats served from Redis with a configurable TTL (default 10s).\n\nFirst request is a cache miss (`cache_hit: false`); subsequent requests within the TTL window return the same cached payload (`cache_hit: true`). Single-flighted server-side to prevent dogpile under TTL expiry."
+          }
+        },
+        {
+          "name": "GET /events/stats/realtime (custom window)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/events/stats/realtime?window_seconds=600",
+              "host": ["{{baseUrl}}"],
+              "path": ["events", "stats", "realtime"],
+              "query": [
+                {"key": "window_seconds", "value": "600"}
+              ]
+            },
+            "description": "Custom rolling window (10 minutes here). Each `window_seconds` value gets its own cache key — concurrent requests for different windows do not invalidate each other."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Workflow examples",
+      "description": "Sequenced requests that demonstrate the full pipeline end-to-end. Run them in order.",
+      "item": [
+        {
+          "name": "1. Ingest a fresh event",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "exec": [
+                  "// Stamp a current timestamp so the event lands inside the realtime window.",
+                  "pm.collectionVariables.set('demoTimestamp', new Date().toISOString());"
+                ],
+                "type": "text/javascript"
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('202 Accepted', () => pm.response.to.have.status(202));",
+                  "pm.collectionVariables.set('lastEventId', pm.response.json().event_id);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"event_type\": \"click\",\n  \"user_id\": \"demo-user\",\n  \"source_url\": \"https://feathr.co/postman-demo\",\n  \"timestamp\": \"{{demoTimestamp}}\",\n  \"metadata\": {\n    \"campaign\": \"postman-walkthrough\",\n    \"label\": \"demo-event\"\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/events",
+              "host": ["{{baseUrl}}"],
+              "path": ["events"]
+            },
+            "description": "Posts a click event with the current timestamp. Captures the `event_id` so step 2 can read it back."
+          }
+        },
+        {
+          "name": "2. Watch the worker process it",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/health/queue",
+              "host": ["{{baseUrl}}"],
+              "path": ["health", "queue"]
+            },
+            "description": "Inspect the queue/worker counters. `processed` should increment within ~1 second of step 1 (batch_timeout = 1s by default)."
+          }
+        },
+        {
+          "name": "3. Read the event back by user_id",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/events?user_id=demo-user",
+              "host": ["{{baseUrl}}"],
+              "path": ["events"],
+              "query": [
+                {"key": "user_id", "value": "demo-user"}
+              ]
+            },
+            "description": "List all events for `demo-user`. The event from step 1 should appear here."
+          }
+        },
+        {
+          "name": "4. Find it via full-text search",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/events/search?q=postman-walkthrough",
+              "host": ["{{baseUrl}}"],
+              "path": ["events", "search"],
+              "query": [
+                {"key": "q", "value": "postman-walkthrough"}
+              ]
+            },
+            "description": "Find the event by the campaign tag in metadata. Round-trip ingest → worker → ES → search."
+          }
+        },
+        {
+          "name": "5. See it counted in realtime stats",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/events/stats/realtime?window_seconds=300",
+              "host": ["{{baseUrl}}"],
+              "path": ["events", "stats", "realtime"],
+              "query": [
+                {"key": "window_seconds", "value": "300"}
+              ]
+            },
+            "description": "Recent 5-minute summary. The event from step 1 contributes to the `click` count."
+          }
+        },
+        {
+          "name": "6. Cache hit on the same window",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/events/stats/realtime?window_seconds=300",
+              "host": ["{{baseUrl}}"],
+              "path": ["events", "stats", "realtime"],
+              "query": [
+                {"key": "window_seconds", "value": "300"}
+              ]
+            },
+            "description": "Repeat the same request within the TTL window (10s). `cache_hit` should now be `true` and `generated_at` should match the previous response exactly."
+          }
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8000",
+      "type": "string"
+    },
+    {
+      "key": "userId",
+      "value": "alice",
+      "type": "string"
+    },
+    {
+      "key": "eventType",
+      "value": "click",
+      "type": "string"
+    },
+    {
+      "key": "windowStart",
+      "value": "2026-05-01T00:00:00Z",
+      "type": "string"
+    },
+    {
+      "key": "windowEnd",
+      "value": "2026-06-01T00:00:00Z",
+      "type": "string"
+    },
+    {
+      "key": "lastEventId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "demoTimestamp",
+      "value": "",
+      "type": "string"
+    }
+  ]
+}
